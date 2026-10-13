@@ -1,6 +1,6 @@
 [package]
 name = "trading-journal-pro"
-version = "0.1.0"
+version = "0.2.1"
 description = "Local-first trading journal"
 authors = ["Trading Journal Pro"]
 edition = "2021"
