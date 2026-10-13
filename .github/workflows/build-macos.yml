@@ -1,11 +1,8 @@
 name: Build macOS DMG (Universal)
-
 on:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   macos-dmg:
     runs-on: macos-15
@@ -21,6 +18,28 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: './src-tauri -> target'
+      - name: Create macOS application icons
+        shell: bash
+        run: |
+          mkdir -p src-tauri/icons/journal.iconset
+          python3 - <<'PY'
+          import zlib,struct,pathlib
+          root=pathlib.Path('src-tauri/icons')
+          def png(n):
+              def chunk(tag,data):
+                  return struct.pack('!I',len(data))+tag+data+struct.pack('!I',zlib.crc32(tag+data)&0xffffffff)
+              rows=b''.join(b'\0'+bytes([42,77,100,255])*n for _ in range(n))
+              return b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('!2I5B',n,n,8,6,0,0,0))+chunk(b'IDAT',zlib.compress(rows,9))+chunk(b'IEND',b'')
+          for s in (16,32,64,128,256,512,1024):
+              (root/f'{s}.png').write_bytes(png(s))
+          for size in (16,32,128,256,512):
+              (root/'journal.iconset'/f'icon_{size}x{size}.png').write_bytes(png(size))
+              (root/'journal.iconset'/f'icon_{size}x{size}@2x.png').write_bytes(png(size*2))
+          (root/'icon.png').write_bytes(png(512))
+          (root/'32x32.png').write_bytes(png(32))
+          (root/'128x128.png').write_bytes(png(128))
+          PY
+          iconutil -c icns src-tauri/icons/journal.iconset -o src-tauri/icons/icon.icns
       - name: Install dependencies
         run: npm install --no-audit --no-fund
       - name: Build Universal DMG
