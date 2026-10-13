@@ -109,11 +109,75 @@ fn get_overview(db:State<Db>)->Result<Overview,String>{
 }
 #[tauri::command]
 fn get_storage_path(app:tauri::AppHandle)->Result<String,String>{Ok(path(&app)?.to_string_lossy().into_owned())}
+
+#[derive(Serialize)]
+#[serde(rename_all="camelCase")]
+struct Attachment{id:String,trade_id:String,role:String,file_name:String}
+#[tauri::command]
+fn save_attachment(app:tauri::AppHandle,db:State<Db>,trade_id:String,role:String,file_name:String,bytes:Vec<u8>)->Result<String,String>{
+ if bytes.is_empty()||bytes.len()>15_000_000{return Err("附件为空或超过15MB".into())}
+ if !["before","during","after","other"].contains(&role.as_str()){return Err("无效截图类型".into())}
+ if !(bytes.starts_with(&[0x89,0x50,0x4e,0x47])||bytes.starts_with(&[0xff,0xd8,0xff])||bytes.starts_with(b"RIFF")||bytes.starts_with(b"GIF8")){return Err("仅支持 PNG、JPEG、WebP、GIF 截图".into())}
+ let extension=if bytes.starts_with(&[0x89,0x50,0x4e,0x47]){"png"}else if bytes.starts_with(&[0xff,0xd8,0xff]){"jpg"}else if bytes.starts_with(b"RIFF"){"webp"}else{"gif"};
+ let id=Uuid::new_v4().to_string();
+ let dir=app.path().app_data_dir().map_err(err)?.join("screenshots");
+ fs::create_dir_all(&dir).map_err(err)?;
+ let file=dir.join(format!("{}.{}",id,extension));
+ {let c=db.0.lock().map_err(err)?;let exists:i64=c.query_row("SELECT COUNT(*) FROM trades WHERE id=?1",[&trade_id],|r|r.get(0)).map_err(err)?;if exists==0{return Err("请先保存交易，再添加截图".into())}}
+ fs::write(&file,&bytes).map_err(err)?;
+ let c=db.0.lock().map_err(err)?;
+ if let Err(e)=c.execute("INSERT INTO trade_attachments(id,trade_id,path,role) VALUES(?1,?2,?3,?4)",params![id,trade_id,file.to_string_lossy(),role]){let _=fs::remove_file(&file);return Err(err(e))}
+ let _=file_name;
+ Ok(id)
+}
+#[tauri::command]
+fn list_attachments(db:State<Db>,trade_id:String)->Result<Vec<Attachment>,String>{
+ let c=db.0.lock().map_err(err)?;
+ let mut q=c.prepare("SELECT id,trade_id,role,path FROM trade_attachments WHERE trade_id=?1 ORDER BY rowid").map_err(err)?;
+ let rows=q.query_map([trade_id],|r|{let p:String=r.get(3)?;Ok(Attachment{id:r.get(0)?,trade_id:r.get(1)?,role:r.get(2)?,file_name:std::path::Path::new(&p).file_name().unwrap_or_default().to_string_lossy().to_string()})}).map_err(err)?;
+ let result=rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err)?;Ok(result)
+}
+#[tauri::command]
+fn read_attachment(db:State<Db>,id:String)->Result<Vec<u8>,String>{
+ let c=db.0.lock().map_err(err)?;
+ let p:String=c.query_row("SELECT path FROM trade_attachments WHERE id=?1",[id],|r|r.get(0)).map_err(err)?;
+ fs::read(p).map_err(err)
+}
+#[tauri::command]
+fn delete_attachment(db:State<Db>,id:String)->Result<(),String>{
+ let c=db.0.lock().map_err(err)?;
+ let p:String=c.query_row("SELECT path FROM trade_attachments WHERE id=?1",[&id],|r|r.get(0)).map_err(err)?;
+ c.execute("DELETE FROM trade_attachments WHERE id=?1",[id]).map_err(err)?;
+ let _=fs::remove_file(p);Ok(())
+}
+#[derive(Deserialize)]
+#[serde(rename_all="camelCase")]
+struct ImportRow{symbol:String,asset_class:String,direction:String,timeframe:String,opened_at:String,closed_at:Option<String>,entry_price:f64,exit_price:Option<f64>,quantity:f64,gross_pnl:Option<f64>,fees:f64,planned_risk_usd:Option<f64>,strategy:String,note:String,status:String}
+#[tauri::command]
+fn import_trades(db:State<Db>,rows:Vec<ImportRow>)->Result<usize,String>{
+ if rows.len()>10000{return Err("单次最多导入10000笔".into())}
+ let mut prepared=Vec::new();
+ for row in rows{
+  let input=Input{id:None,account_id:"main".into(),symbol:row.symbol,asset_class:row.asset_class,direction:row.direction,timeframe:row.timeframe,opened_at:row.opened_at,closed_at:row.closed_at,entry_price:row.entry_price,exit_price:row.exit_price,stop_loss:None,take_profit:None,quantity:row.quantity,gross_pnl:row.gross_pnl,fees:row.fees,planned_risk_usd:row.planned_risk_usd,strategy:row.strategy,note:row.note,status:row.status};
+  validate(&input)?;let sess=session(&input.opened_at)?;
+  prepared.push((input,sess));
+ }
+ let mut c=db.0.lock().map_err(err)?;let tx=c.transaction().map_err(err)?;
+ let mut count=0usize;
+ for (v,sess) in prepared{
+  let net=if v.status=="closed"{v.gross_pnl.map(|x|x-v.fees)}else{None};
+  let r=match(net,v.planned_risk_usd){(Some(n),Some(den)) if den>0.0=>Some(n/den),_=>None};
+  tx.execute("INSERT INTO trades(id,account_id,symbol,asset_class,direction,timeframe,opened_at,closed_at,entry_price,exit_price,stop_loss,take_profit,quantity,gross_pnl,fees,net_pnl,planned_risk_usd,actual_r,session,strategy,note,status) VALUES (?1,'main',?2,?3,?4,?5,?6,?7,?8,NULL,NULL,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+  params![Uuid::new_v4().to_string(),v.symbol,v.asset_class,v.direction,v.timeframe,v.opened_at,v.closed_at,v.entry_price,v.exit_price,v.quantity,v.gross_pnl,v.fees,net,v.planned_risk_usd,r,sess,v.strategy,v.note,v.status]).map_err(err)?;count+=1;
+ }
+ tx.commit().map_err(err)?;Ok(count)
+}
+
 #[cfg_attr(mobile,tauri::mobile_entry_point)]
 pub fn run(){
  tauri::Builder::default().setup(|app|{
   let p=path(app.handle()).map_err(std::io::Error::other)?;
   let conn=Connection::open(p)?;init(&conn)?;app.manage(Db(Mutex::new(conn)));Ok(())
- }).invoke_handler(tauri::generate_handler![list_trades,save_trade,delete_trade,get_overview,get_storage_path])
+ }).invoke_handler(tauri::generate_handler![list_trades,save_trade,delete_trade,get_overview,get_storage_path,save_attachment,list_attachments,read_attachment,delete_attachment,import_trades])
  .run(tauri::generate_context!()).expect("error while running Trading Journal Pro");
 }
