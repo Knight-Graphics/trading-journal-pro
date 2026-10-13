@@ -77,7 +77,9 @@ const COLS:&str="id,account_id,symbol,asset_class,direction,timeframe,opened_at,
 fn list_trades(db:State<Db>)->Result<Vec<Trade>,String>{
  let c=db.0.lock().map_err(err)?;
  let mut q=c.prepare(&format!("SELECT {} FROM trades ORDER BY opened_at DESC",COLS)).map_err(err)?;
- q.query_map([],row).map_err(err)?.collect::<rusqlite::Result<Vec<_>>>().map_err(err)
+ let rows = q.query_map([], row).map_err(err)?;
+ let trades = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(err)?;
+ Ok(trades)
 }
 #[tauri::command]
 fn save_trade(db:State<Db>,input:Input)->Result<Trade,String>{
