@@ -173,11 +173,42 @@ fn import_trades(db:State<Db>,rows:Vec<ImportRow>)->Result<usize,String>{
  tx.commit().map_err(err)?;Ok(count)
 }
 
+
+#[tauri::command]
+fn backup_database(app:tauri::AppHandle,db:State<Db>)->Result<String,String>{
+ let folder=app.path().app_data_dir().map_err(err)?.join("backups");
+ fs::create_dir_all(&folder).map_err(err)?;
+ let file=folder.join(format!("trading-journal-{}.sqlite",Utc::now().format("%Y%m%d-%H%M%S")));
+ let safe=file.to_string_lossy().replace("'", "''");
+ let c=db.0.lock().map_err(err)?;
+ c.execute_batch(&format!("VACUUM INTO '{}';",safe)).map_err(err)?;
+ Ok(file.to_string_lossy().into_owned())
+}
+#[tauri::command]
+fn export_csv(app:tauri::AppHandle,db:State<Db>)->Result<String,String>{
+ let folder=app.path().app_data_dir().map_err(err)?.join("exports");fs::create_dir_all(&folder).map_err(err)?;
+ let file=folder.join(format!("trades-{}.csv",Utc::now().format("%Y%m%d-%H%M%S")));
+ let c=db.0.lock().map_err(err)?;
+ let mut q=c.prepare(&format!("SELECT {} FROM trades ORDER BY opened_at DESC",COLS)).map_err(err)?;
+ let trades=q.query_map([],row).map_err(err)?.collect::<rusqlite::Result<Vec<_>>>().map_err(err)?;
+ fn escape(x:&str)->String{
+  let cleaned=x.replace('"',"\"\"");
+  let safe=if cleaned.starts_with(['=','+','-','@']){format!("'{}",cleaned)}else{cleaned};
+  format!("\"{}\"",safe)
+ }
+ let mut csv=String::from("\u{feff}symbol,assetClass,direction,timeframe,openedAt,closedAt,entryPrice,exitPrice,quantity,grossPnl,fees,plannedRiskUsd,strategy,note,status\r\n");
+ for t in trades{
+ let fields=[t.symbol,t.asset_class,t.direction,t.timeframe,t.opened_at,t.closed_at.unwrap_or_default(),t.entry_price.to_string(),t.exit_price.map(|v|v.to_string()).unwrap_or_default(),t.quantity.to_string(),t.gross_pnl.map(|v|v.to_string()).unwrap_or_default(),t.fees.to_string(),t.planned_risk_usd.map(|v|v.to_string()).unwrap_or_default(),t.strategy,t.note,t.status];
+ csv.push_str(&fields.iter().map(|x|escape(x)).collect::<Vec<_>>().join(","));csv.push_str("\r\n");
+ }
+ fs::write(&file,csv).map_err(err)?;Ok(file.to_string_lossy().into_owned())
+}
+
 #[cfg_attr(mobile,tauri::mobile_entry_point)]
 pub fn run(){
  tauri::Builder::default().setup(|app|{
   let p=path(app.handle()).map_err(std::io::Error::other)?;
   let conn=Connection::open(p)?;init(&conn)?;app.manage(Db(Mutex::new(conn)));Ok(())
- }).invoke_handler(tauri::generate_handler![list_trades,save_trade,delete_trade,get_overview,get_storage_path,save_attachment,list_attachments,read_attachment,delete_attachment,import_trades])
+ }).invoke_handler(tauri::generate_handler![list_trades,save_trade,delete_trade,get_overview,get_storage_path,save_attachment,list_attachments,read_attachment,delete_attachment,import_trades,backup_database,export_csv])
  .run(tauri::generate_context!()).expect("error while running Trading Journal Pro");
 }
