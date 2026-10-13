@@ -193,7 +193,7 @@ fn export_csv(app:tauri::AppHandle,db:State<Db>)->Result<String,String>{
  let trades=q.query_map([],row).map_err(err)?.collect::<rusqlite::Result<Vec<_>>>().map_err(err)?;
  fn escape(x:&str)->String{
   let cleaned=x.replace('"',"\"\"");
-  let safe=if cleaned.starts_with(['=','+','-','@']){format!("'{}",cleaned)}else{cleaned};
+  let safe=if cleaned.chars().next().map(|c| "=+-@".contains(c)).unwrap_or(false){format!("'{}",cleaned)}else{cleaned};
   format!("\"{}\"",safe)
  }
  let mut csv=String::from("\u{feff}symbol,assetClass,direction,timeframe,openedAt,closedAt,entryPrice,exitPrice,quantity,grossPnl,fees,plannedRiskUsd,strategy,note,status\r\n");
